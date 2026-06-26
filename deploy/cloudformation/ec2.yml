@@ -115,17 +115,17 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-          Description: HTTP — Nginx
+          Description: HTTP Nginx
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: HTTPS (for when you add a cert)
+          Description: HTTPS for when you add a cert
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
           CidrIp: 0.0.0.0/0
-          Description: SSH — restrict to your IP in production
+          Description: SSH restrict to your IP in production
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
