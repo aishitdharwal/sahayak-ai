@@ -539,11 +539,11 @@ Resources:
             - Name: REDIS_URL
               ValueFrom: !Ref RedisUrlSecret
           HealthCheck:
-            Command: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+            Command: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
             Interval: 30
             Timeout: 5
             Retries: 3
-            StartPeriod: 10
+            StartPeriod: 120
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -617,7 +617,7 @@ Resources:
         # MinimumHealthyPercent: 50 means one task stays up while the other is replaced
         MinimumHealthyPercent: 50
         MaximumPercent: 200
-      HealthCheckGracePeriodSeconds: 30
+      HealthCheckGracePeriodSeconds: 120
 
   # ==========================================================================
   # 13. S3 + CLOUDFRONT (React frontend)
@@ -671,6 +671,25 @@ Resources:
             S3OriginConfig:
               OriginAccessIdentity: ""
             OriginAccessControlId: !Ref CloudFrontOAC
+          - Id: ALBOrigin
+            DomainName: !GetAtt ALB.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        # /api/* and /ws/agent forward to the ALB — not cached, all headers passed through
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: allow-all
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # AllViewer
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          - PathPattern: /ws/agent
+            TargetOriginId: ALBOrigin
+            ViewerProtocolPolicy: allow-all
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # AllViewer
+            AllowedMethods: [GET, HEAD]
         DefaultCacheBehavior:
           ViewerProtocolPolicy: redirect-to-https
           TargetOriginId: S3Origin

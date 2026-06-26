@@ -13,9 +13,10 @@ FLOW:
     6. We save the audit log and push a "completed" WebSocket event.
 """
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from backend.db.session import get_db
+from backend.db.session import get_db, SessionLocal
 from backend.db import crud
 from backend.models.ticket import HITLDecision
 from backend.api.ws import manager
@@ -30,7 +31,42 @@ def set_graph(graph):
     _graph = graph
 
 
-@router.post("/{ticket_id}/decide")
+async def _run_decision(ticket_id: str, decision: HITLDecision, config: dict):
+    """Resume the graph and broadcast result — runs in the background so the HTTP response returns immediately."""
+    from backend.graph.pipeline import get_thread_config  # noqa: F401
+    try:
+        await _graph.aupdate_state(config, {"hitl_decision": decision})
+        await _graph.ainvoke(None, config)
+
+        final_snapshot = await _graph.aget_state(config)
+        audit_entry = final_snapshot.values.get("audit_entry")
+
+        db = SessionLocal()
+        try:
+            if audit_entry:
+                crud.save_audit_log(db, audit_entry)
+            crud.update_ticket_status(
+                db, ticket_id,
+                "completed" if decision.action.value != "reject" else "rejected",
+            )
+        finally:
+            db.close()
+
+        await manager.broadcast({
+            "event": "ticket_resolved",
+            "ticket_id": ticket_id,
+            "action": decision.action.value,
+            "human_agent_id": decision.human_agent_id,
+        })
+    except Exception as exc:
+        await manager.broadcast({
+            "event": "pipeline_error",
+            "ticket_id": ticket_id,
+            "error": str(exc),
+        })
+
+
+@router.post("/{ticket_id}/decide", status_code=202)
 async def submit_hitl_decision(
     ticket_id: str,
     decision: HITLDecision,
@@ -45,36 +81,10 @@ async def submit_hitl_decision(
     if not state_snapshot or not state_snapshot.values.get("workspace"):
         raise HTTPException(status_code=404, detail=f"No pending HITL state for ticket {ticket_id}")
 
-    # Inject the human's decision into the graph state
-    await _graph.aupdate_state(config, {"hitl_decision": decision})
+    # Return 202 immediately — graph resumes in background, result pushed via WebSocket
+    asyncio.create_task(_run_decision(ticket_id, decision, config))
 
-    # Resume the graph — execute_action node will now run
-    await _graph.ainvoke(None, config)
-
-    # Fetch final state from checkpointer to get the audit entry
-    final_snapshot = await _graph.aget_state(config)
-    audit_entry = final_snapshot.values.get("audit_entry")
-    if audit_entry:
-        crud.save_audit_log(db, audit_entry)
-
-    crud.update_ticket_status(
-        db, ticket_id,
-        "completed" if decision.action.value != "reject" else "rejected"
-    )
-
-    # Notify all connected dashboard clients
-    await manager.broadcast({
-        "event": "ticket_resolved",
-        "ticket_id": ticket_id,
-        "action": decision.action.value,
-        "human_agent_id": decision.human_agent_id,
-    })
-
-    return {
-        "status": "resolved",
-        "ticket_id": ticket_id,
-        "action": decision.action.value,
-    }
+    return {"status": "processing", "ticket_id": ticket_id}
 
 
 @router.get("/{ticket_id}/state")

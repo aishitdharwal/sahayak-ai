@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import axios from "axios";
 import { AgentWorkspace, HITLAction, WSEvent } from "../types";
 import { TicketCard } from "../components/TicketCard";
@@ -23,6 +23,27 @@ export function AgentDashboard() {
   const [editedDraft, setEditedDraft] = useState<string>("");
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "live">("connecting");
 
+  // On mount, restore any ticket already paused at the HITL breakpoint
+  useEffect(() => {
+    async function restorePending() {
+      try {
+        const queueRes = await axios.get(`${API}/api/tickets/queue`);
+        const pending = queueRes.data as Array<{ ticket_id: string }>;
+        if (pending.length === 0) return;
+        const { ticket_id } = pending[0];
+        const stateRes = await axios.get(`${API}/api/hitl/${ticket_id}/state`);
+        const workspace: AgentWorkspace = stateRes.data.workspace;
+        setEditedDraft(workspace.draft_response);
+        setTicketState({ status: "review", workspace });
+      } catch {
+        // no pending ticket or API unreachable — stay idle
+      }
+    }
+    restorePending();
+  }, []);
+
+  const handleConnect = useCallback(() => setConnectionStatus("live"), []);
+
   const handleWSEvent = useCallback((event: WSEvent) => {
     setConnectionStatus("live");
 
@@ -36,7 +57,7 @@ export function AgentDashboard() {
     }
   }, []);
 
-  useAgentSocket(handleWSEvent);
+  useAgentSocket(handleWSEvent, handleConnect);
 
   const handleDecision = async (action: HITLAction, notes?: string) => {
     if (ticketState.status !== "review") return;
@@ -44,13 +65,20 @@ export function AgentDashboard() {
 
     const isEdited = editedDraft !== workspace.draft_response;
 
-    await axios.post(`${API}/api/hitl/${workspace.ticket.ticket_id}/decide`, {
-      ticket_id: workspace.ticket.ticket_id,
-      action: isEdited ? "edit_and_approve" : action,
-      final_response: editedDraft,
-      human_agent_id: AGENT_ID,
-      edit_notes: notes,
-    });
+    try {
+      await axios.post(`${API}/api/hitl/${workspace.ticket.ticket_id}/decide`, {
+        ticket_id: workspace.ticket.ticket_id,
+        action: isEdited ? "edit_and_approve" : action,
+        final_response: editedDraft,
+        human_agent_id: AGENT_ID,
+        edit_notes: notes,
+      });
+    } catch (err: unknown) {
+      const msg = axios.isAxiosError(err)
+        ? `${err.response?.status}: ${JSON.stringify(err.response?.data)}`
+        : String(err);
+      setTicketState({ status: "error", message: `Decision failed — ${msg}` });
+    }
   };
 
   return (

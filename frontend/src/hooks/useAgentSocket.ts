@@ -3,10 +3,12 @@ import { WSEvent } from "../types";
 
 const WS_URL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/agent`;
 
-export function useAgentSocket(onEvent: (event: WSEvent) => void) {
+export function useAgentSocket(onEvent: (event: WSEvent) => void, onConnect?: () => void) {
   const wsRef = useRef<WebSocket | null>(null);
   const onEventRef = useRef(onEvent);
+  const onConnectRef = useRef(onConnect);
   onEventRef.current = onEvent;
+  onConnectRef.current = onConnect;
 
   const connect = useCallback(() => {
     const ws = new WebSocket(WS_URL);
@@ -27,6 +29,7 @@ export function useAgentSocket(onEvent: (event: WSEvent) => void) {
     };
 
     ws.onopen = () => {
+      onConnectRef.current?.();
       // Send a ping every 30s to keep the connection alive
       const interval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send("ping");
