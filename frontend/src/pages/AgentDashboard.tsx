@@ -8,7 +8,7 @@ import { DraftEditor } from "../components/DraftEditor";
 import { ActionButtons } from "../components/ActionButtons";
 import { useAgentSocket } from "../hooks/useAgentSocket";
 
-const API = "http://localhost:8000";
+const API = import.meta.env.VITE_API_URL ?? "";
 const AGENT_ID = "agent-001";
 
 type TicketState =

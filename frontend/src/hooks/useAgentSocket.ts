@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { WSEvent } from "../types";
 
-const WS_URL = "ws://localhost:8000/ws/agent";
+const WS_URL = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/agent`;
 
 export function useAgentSocket(onEvent: (event: WSEvent) => void) {
   const wsRef = useRef<WebSocket | null>(null);

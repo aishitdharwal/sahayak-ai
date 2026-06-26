@@ -9,7 +9,7 @@ interface QueueTicket {
   created_at: string;
 }
 
-const API = "http://localhost:8000";
+const API = import.meta.env.VITE_API_URL ?? "";
 
 export function TicketQueue() {
   const [tickets, setTickets] = useState<QueueTicket[]>([]);
