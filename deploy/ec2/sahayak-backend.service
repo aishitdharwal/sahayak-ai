@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/opt/sahayak/backend
+WorkingDirectory=/opt/sahayak
 Environment=PATH=/opt/sahayak/venv/bin
 EnvironmentFile=/opt/sahayak/.env
 
