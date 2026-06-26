@@ -8,8 +8,8 @@ langchain>=0.3.0
 langchain-core>=0.2.0
 
 # Embeddings (local, no extra API key needed for the demo)
-sentence-transformers>=2.7.0
-langchain-huggingface>=0.0.3
+# fastembed uses ONNX runtime — avoids PyTorch's torch._dynamo import conflicts
+fastembed>=0.3.0
 
 # API layer
 fastapi>=0.111.0
