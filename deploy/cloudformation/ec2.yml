@@ -206,10 +206,16 @@ Resources:
 
           # System packages
           apt-get update -y
-          apt-get install -y python3.11 python3.11-venv python3-pip nginx git awscli jq
-          # Node 18 — Ubuntu 22.04 apt ships Node 12 which is too old for modern TypeScript
-          curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-          apt-get install -y nodejs
+          apt-get install -y python3.11 python3.11-venv python3-pip nginx git awscli jq curl
+          # Node 18 via nvm — Ubuntu 22.04 apt ships Node 12, too old for modern TypeScript
+          export NVM_DIR="/root/.nvm"
+          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+          source "$NVM_DIR/nvm.sh"
+          nvm install 18
+          nvm alias default 18
+          # Symlink into /usr/local/bin so all users and scripts can find node/npm
+          ln -sf "$NVM_DIR/versions/node/$(nvm version)/bin/node" /usr/local/bin/node
+          ln -sf "$NVM_DIR/versions/node/$(nvm version)/bin/npm" /usr/local/bin/npm
 
           # Fetch secrets from Secrets Manager into env file
           ANTHROPIC_KEY=$(aws secretsmanager get-secret-value \
@@ -263,9 +269,13 @@ Resources:
           python -m backend.rag.indexer || true
 
           # Build React frontend
-          cd frontend && npm install --silent && npm run build && cd ..
+          cd frontend && npm install && npm run build && cd ..
 
-          # Install systemd service
+          # Hand ownership to ubuntu before the service starts — service runs as ubuntu
+          # and needs write access to create SQLite db files
+          chown -R ubuntu:ubuntu /opt/sahayak
+
+          # Install and start systemd service
           cp deploy/ec2/sahayak-backend.service /etc/systemd/system/
           systemctl daemon-reload
           systemctl enable sahayak-backend
@@ -276,9 +286,6 @@ Resources:
           ln -sf /etc/nginx/sites-available/sahayak /etc/nginx/sites-enabled/sahayak
           rm -f /etc/nginx/sites-enabled/default
           systemctl restart nginx
-
-          # Hand ownership to the ubuntu user — the systemd service runs as ubuntu
-          chown -R ubuntu:ubuntu /opt/sahayak
 
           echo "SETUP COMPLETE"
 
