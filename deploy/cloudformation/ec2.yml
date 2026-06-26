@@ -274,6 +274,9 @@ Resources:
           rm -f /etc/nginx/sites-enabled/default
           systemctl restart nginx
 
+          # Hand ownership to the ubuntu user — the systemd service runs as ubuntu
+          chown -R ubuntu:ubuntu /opt/sahayak
+
           echo "SETUP COMPLETE"
 
   ElasticIP:
