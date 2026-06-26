@@ -28,6 +28,14 @@ ISSUE_TO_SECTION_HINTS: dict[str, list[str]] = {
 @lru_cache(maxsize=1)
 def _get_retriever():
     """Cache the vectorstore — ChromaDB init is slow, do it once."""
+    # torch._dynamo can register dispatch rules twice when sentence-transformers
+    # is imported alongside other torch-using packages, causing a ValueError.
+    # reset() clears the state before first use, preventing the duplicate.
+    try:
+        import torch
+        torch._dynamo.reset()
+    except Exception:
+        pass
     vs = get_vectorstore()
     return vs.as_retriever(search_kwargs={"k": 4})
 
