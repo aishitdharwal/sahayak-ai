@@ -206,7 +206,10 @@ Resources:
 
           # System packages
           apt-get update -y
-          apt-get install -y python3.11 python3.11-venv python3-pip nodejs npm nginx git awscli jq
+          apt-get install -y python3.11 python3.11-venv python3-pip nginx git awscli jq
+          # Node 18 — Ubuntu 22.04 apt ships Node 12 which is too old for modern TypeScript
+          curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+          apt-get install -y nodejs
 
           # Fetch secrets from Secrets Manager into env file
           ANTHROPIC_KEY=$(aws secretsmanager get-secret-value \
