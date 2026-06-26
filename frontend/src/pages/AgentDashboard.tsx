@@ -23,24 +23,23 @@ export function AgentDashboard() {
   const [editedDraft, setEditedDraft] = useState<string>("");
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "live">("connecting");
 
-  // On mount, restore any ticket already paused at the HITL breakpoint
-  useEffect(() => {
-    async function restorePending() {
-      try {
-        const queueRes = await axios.get(`${API}/api/tickets/queue`);
-        const pending = queueRes.data as Array<{ ticket_id: string }>;
-        if (pending.length === 0) return;
-        const { ticket_id } = pending[0];
-        const stateRes = await axios.get(`${API}/api/hitl/${ticket_id}/state`);
-        const workspace: AgentWorkspace = stateRes.data.workspace;
-        setEditedDraft(workspace.draft_response);
-        setTicketState({ status: "review", workspace });
-      } catch {
-        // no pending ticket or API unreachable — stay idle
-      }
+  const loadNextPending = useCallback(async () => {
+    try {
+      const queueRes = await axios.get(`${API}/api/tickets/queue`);
+      const pending = queueRes.data as Array<{ ticket_id: string }>;
+      if (pending.length === 0) return;
+      const { ticket_id } = pending[0];
+      const stateRes = await axios.get(`${API}/api/hitl/${ticket_id}/state`);
+      const workspace: AgentWorkspace = stateRes.data.workspace;
+      setEditedDraft(workspace.draft_response);
+      setTicketState({ status: "review", workspace });
+    } catch {
+      // no pending ticket or API unreachable — stay idle
     }
-    restorePending();
   }, []);
+
+  // On mount, restore any ticket already paused at the HITL breakpoint
+  useEffect(() => { loadNextPending(); }, [loadNextPending]);
 
   const handleConnect = useCallback(() => setConnectionStatus("live"), []);
 
@@ -139,7 +138,7 @@ export function AgentDashboard() {
             <p className="text-sm text-gray-500">Action: <span className="font-semibold capitalize">{ticketState.action.replace("_", " ")}</span></p>
             <p className="text-xs text-gray-400 mt-1">Ticket: {ticketState.ticket_id}</p>
             <button
-              onClick={() => setTicketState({ status: "idle" })}
+              onClick={loadNextPending}
               className="mt-4 text-sm text-indigo-600 hover:underline"
             >
               Ready for next ticket
