@@ -252,6 +252,7 @@ Resources:
           REASONING_MODEL=claude-sonnet-4-6
           FRONTEND_URL=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
           ENVIRONMENT=production
+          TORCHDYNAMO_DISABLE=1
           EOF
 
           # Python dependencies
