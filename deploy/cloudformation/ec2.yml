@@ -207,16 +207,10 @@ Resources:
           # System packages
           apt-get update -y
           apt-get install -y python3.11 python3.11-venv python3-pip nginx git awscli jq curl
-          # Node 18 via nvm — do NOT pre-set NVM_DIR before install or it warns + skips
-          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-          export NVM_DIR="/root/.nvm"
-          source "$NVM_DIR/nvm.sh"
-          nvm install 18
-          nvm alias default 18
-          # Symlink into /usr/local/bin so all users and scripts can find node/npm
-          NVM_NODE_PATH="$NVM_DIR/versions/node/$(nvm version 18)/bin"
-          ln -sf "$NVM_NODE_PATH/node" /usr/local/bin/node
-          ln -sf "$NVM_NODE_PATH/npm" /usr/local/bin/npm
+          # Node 18 via NodeSource — installs to /usr/bin, no $HOME dependency
+          curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+          apt-get install -y nodejs
+          node --version && npm --version
 
           # Fetch secrets from Secrets Manager into env file
           ANTHROPIC_KEY=$(aws secretsmanager get-secret-value \
