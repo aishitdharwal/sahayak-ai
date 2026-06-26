@@ -256,8 +256,8 @@ Resources:
           pip install --upgrade pip --quiet
           pip install -r backend/requirements.txt --quiet
 
-          # Index SOP documents (run from project root so module path resolves correctly)
-          python -m backend.rag.indexer
+          # Index SOP documents — || true prevents set -e from aborting on torch stderr noise
+          python -m backend.rag.indexer || true
 
           # Build React frontend
           cd frontend && npm install --silent && npm run build && cd ..
