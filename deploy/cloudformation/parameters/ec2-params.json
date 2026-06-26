@@ -1,11 +1,11 @@
 [
   {
     "ParameterKey": "AnthropicApiKey",
-    "ParameterValue": "FILL_ME_IN"
+    "ParameterValue": "sk-ant-FILL_ME_IN"
   },
   {
     "ParameterKey": "KeyPairName",
-    "ParameterValue": "FILL_ME_IN"
+    "ParameterValue": "sahayak-key"
   },
   {
     "ParameterKey": "InstanceType",
@@ -17,11 +17,11 @@
   },
   {
     "ParameterKey": "LangfuseSecretKey",
-    "ParameterValue": "FILL_ME_IN"
+    "ParameterValue": "sk-lf-FILL_ME_IN"
   },
   {
     "ParameterKey": "LangfusePublicKey",
-    "ParameterValue": "FILL_ME_IN"
+    "ParameterValue": "pk-lf-FILL_ME_IN"
   },
   {
     "ParameterKey": "LangfuseHost",

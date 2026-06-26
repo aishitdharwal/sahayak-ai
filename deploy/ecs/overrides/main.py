@@ -28,7 +28,7 @@ from backend.api import tickets as tickets_router
 from backend.api import hitl as hitl_router
 
 # ECS: Redis-backed manager instead of in-memory
-from deploy.ecs.overrides.api.ws import manager
+from backend.api.ws import manager
 
 
 @asynccontextmanager
@@ -37,8 +37,13 @@ async def lifespan(app: FastAPI):
 
     # ECS: AsyncPostgresSaver — one line change from SqliteSaver.
     # Uses the same postgres_url for both the app DB and LangGraph checkpoints.
-    async with AsyncPostgresSaver.from_conn_string(settings.postgres_url) as checkpointer:
-        await checkpointer.setup()  # Creates checkpoint tables if they don't exist
+    # AsyncPostgresSaver expects plain postgresql:// — strip the +asyncpg SQLAlchemy prefix
+    pg_dsn = settings.postgres_url.replace("postgresql+asyncpg://", "postgresql://")
+    async with AsyncPostgresSaver.from_conn_string(pg_dsn) as checkpointer:
+        try:
+            await checkpointer.setup()  # Creates checkpoint tables if they don't exist
+        except Exception:
+            pass  # Another worker already ran setup — tables exist, safe to continue
 
         graph = build_graph(checkpointer)
         tickets_router.set_graph(graph, checkpointer)

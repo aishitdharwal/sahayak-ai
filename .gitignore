@@ -31,3 +31,8 @@ frontend/dist/
 
 # Workshop outline (internal planning doc)
 flipkart_project_outline.md
+frontend/.env.local
+
+# CloudFormation parameter files contain real API keys — never commit
+deploy/cloudformation/parameters/ec2-params.json
+deploy/cloudformation/parameters/ecs-params.json

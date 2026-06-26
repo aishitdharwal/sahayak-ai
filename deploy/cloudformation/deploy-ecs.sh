@@ -45,14 +45,17 @@ else
   OPERATION="create-stack"
 fi
 
-# On first deploy ECRImageUri doesn't exist yet — use a placeholder
-# ECS service won't start until Phase 4 updates it
+# On first deploy: set DesiredTaskCount=0 so ECS doesn't try to pull an image
+# that doesn't exist yet. Phase 4 will set the real count after the image is pushed.
 PARAMS=$(cat $PARAMS_FILE | python3 -c "
 import json, sys
+operation = '$OPERATION'
 params = json.load(sys.stdin)
 for p in params:
     if p['ParameterKey'] == 'ECRImageUri':
         p['ParameterValue'] = '$ECR_URI:latest'
+    if p['ParameterKey'] == 'DesiredTaskCount' and operation == 'create-stack':
+        p['ParameterValue'] = '0'
 print(json.dumps(params))
 ")
 
@@ -97,62 +100,30 @@ aws ecr get-login-password --region $REGION | \
 IMAGE_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo "latest")
 FULL_IMAGE_URI="$ECR_URI:$IMAGE_TAG"
 
-docker build \
+# Ensure a buildx builder with multi-platform support exists
+docker buildx inspect sahayak-builder &>/dev/null || \
+  docker buildx create --name sahayak-builder --driver docker-container --bootstrap
+docker buildx use sahayak-builder
+
+docker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  --sbom=false \
   -f deploy/ecs/Dockerfile \
   -t "$FULL_IMAGE_URI" \
   -t "$ECR_URI:latest" \
+  --push \
   .
-
-docker push "$FULL_IMAGE_URI"
-docker push "$ECR_URI:latest"
 
 echo "Image pushed: $FULL_IMAGE_URI"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 3: Write connection string secrets to Secrets Manager
-# These are runtime values that only exist after the infra is up
-# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3: Connection string secrets are now managed by CloudFormation
+# PostgresUrlSecret and RedisUrlSecret are created in ecs.yml using !GetAtt
+# on RDSInstance.Endpoint.Address and ElastiCacheCluster.RedisEndpoint.Address.
+# No manual secret creation needed here.
 echo ""
-echo "[3/6] Writing connection string secrets..."
-
-DB_PASSWORD=$(cat $PARAMS_FILE | python3 -c "
-import json, sys
-params = json.load(sys.stdin)
-for p in params:
-    if p['ParameterKey'] == 'DBPassword':
-        print(p['ParameterValue'])
-")
-
-POSTGRES_URL="postgresql+asyncpg://sahayak:${DB_PASSWORD}@${RDS_HOST}:5432/sahayak"
-REDIS_URL="redis://${REDIS_HOST}:6379"
-
-# Create or update postgres-url secret
-if aws secretsmanager describe-secret --secret-id sahayak/postgres-url --region $REGION &>/dev/null; then
-  aws secretsmanager update-secret \
-    --secret-id sahayak/postgres-url \
-    --secret-string "$POSTGRES_URL" \
-    --region $REGION > /dev/null
-else
-  aws secretsmanager create-secret \
-    --name sahayak/postgres-url \
-    --secret-string "$POSTGRES_URL" \
-    --region $REGION > /dev/null
-fi
-
-# Create or update redis-url secret
-if aws secretsmanager describe-secret --secret-id sahayak/redis-url --region $REGION &>/dev/null; then
-  aws secretsmanager update-secret \
-    --secret-id sahayak/redis-url \
-    --secret-string "$REDIS_URL" \
-    --region $REGION > /dev/null
-else
-  aws secretsmanager create-secret \
-    --name sahayak/redis-url \
-    --secret-string "$REDIS_URL" \
-    --region $REGION > /dev/null
-fi
-
-echo "Secrets written."
+echo "[3/6] Connection string secrets managed by CloudFormation — skipping."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 4: Force ECS service to redeploy with the new image
@@ -160,13 +131,22 @@ echo "Secrets written."
 echo ""
 echo "[4/6] Triggering ECS rolling deploy..."
 
+DESIRED_COUNT=$(cat $PARAMS_FILE | python3 -c "
+import json, sys
+params = json.load(sys.stdin)
+for p in params:
+    if p['ParameterKey'] == 'DesiredTaskCount':
+        print(p['ParameterValue'])
+")
+
 aws ecs update-service \
   --cluster sahayak-cluster \
   --service sahayak-backend \
+  --desired-count $DESIRED_COUNT \
   --force-new-deployment \
   --region $REGION > /dev/null
 
-echo "Rolling deploy triggered. Tasks will be replaced one by one."
+echo "Rolling deploy triggered (desired=$DESIRED_COUNT). Tasks will be replaced one by one."
 echo "Watch progress: aws ecs describe-services --cluster sahayak-cluster --services sahayak-backend --region $REGION"
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ COPY backend/ ./backend/
 COPY deploy/ecs/overrides/config.py ./backend/config.py
 COPY deploy/ecs/overrides/main.py ./backend/main.py
 COPY deploy/ecs/overrides/api/ws.py ./backend/api/ws.py
+COPY deploy/ecs/overrides/db/session.py ./backend/db/session.py
 
 # Non-root user — security best practice
 RUN useradd -m appuser

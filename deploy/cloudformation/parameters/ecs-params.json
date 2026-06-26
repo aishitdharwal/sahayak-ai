@@ -21,7 +21,7 @@
   },
   {
     "ParameterKey": "LangfuseBaseUrl",
-    "ParameterValue": "https://cloud.langfuse.com"
+    "ParameterValue": "https://eu.cloud.langfuse.com"
   },
   {
     "ParameterKey": "DesiredTaskCount",
