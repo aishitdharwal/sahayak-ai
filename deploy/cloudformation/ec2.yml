@@ -30,11 +30,22 @@ Parameters:
     Type: String
     Description: HTTPS URL of your repo, e.g. https://github.com/yourorg/sahayak-ai.git
 
-  LangSmithApiKey:
+  LangfuseSecretKey:
     Type: String
     NoEcho: true
     Default: ""
-    Description: Optional — enables LangSmith tracing
+    Description: Optional — Langfuse secret key for observability tracing
+
+  LangfusePublicKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional — Langfuse public key
+
+  LangfuseHost:
+    Type: String
+    Default: "https://cloud.langfuse.com"
+    Description: Langfuse host (use https://eu.cloud.langfuse.com for EU region)
 
 # ---------------------------------------------------------------------------
 # Resources
@@ -129,11 +140,11 @@ Resources:
       Name: sahayak/anthropic-key
       SecretString: !Sub '{"ANTHROPIC_API_KEY":"${AnthropicApiKey}"}'
 
-  LangSmithSecret:
+  LangfuseSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: sahayak/langsmith-key
-      SecretString: !Sub '{"LANGCHAIN_API_KEY":"${LangSmithApiKey}"}'
+      Name: sahayak/langfuse
+      SecretString: !Sub '{"LANGFUSE_SECRET_KEY":"${LangfuseSecretKey}","LANGFUSE_PUBLIC_KEY":"${LangfusePublicKey}","LANGFUSE_HOST":"${LangfuseHost}"}'
 
   # --- IAM ------------------------------------------------------------------
 
@@ -159,7 +170,7 @@ Resources:
                 Action: secretsmanager:GetSecretValue
                 Resource:
                   - !Ref AnthropicSecret
-                  - !Ref LangSmithSecret
+                  - !Ref LangfuseSecret
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -203,10 +214,20 @@ Resources:
             --region ${AWS::Region} \
             --query SecretString --output text | jq -r '.ANTHROPIC_API_KEY')
 
-          LANGSMITH_KEY=$(aws secretsmanager get-secret-value \
-            --secret-id sahayak/langsmith-key \
+          LANGFUSE_SK=$(aws secretsmanager get-secret-value \
+            --secret-id sahayak/langfuse \
             --region ${AWS::Region} \
-            --query SecretString --output text | jq -r '.LANGCHAIN_API_KEY')
+            --query SecretString --output text | jq -r '.LANGFUSE_SECRET_KEY')
+
+          LANGFUSE_PK=$(aws secretsmanager get-secret-value \
+            --secret-id sahayak/langfuse \
+            --region ${AWS::Region} \
+            --query SecretString --output text | jq -r '.LANGFUSE_PUBLIC_KEY')
+
+          LANGFUSE_HOST=$(aws secretsmanager get-secret-value \
+            --secret-id sahayak/langfuse \
+            --region ${AWS::Region} \
+            --query SecretString --output text | jq -r '.LANGFUSE_HOST')
 
           # Clone application
           mkdir -p /opt/sahayak
@@ -216,8 +237,10 @@ Resources:
           # Write .env (never echoed to logs because secrets were fetched via SDK)
           cat > .env <<EOF
           ANTHROPIC_API_KEY=$ANTHROPIC_KEY
-          LANGCHAIN_API_KEY=$LANGSMITH_KEY
-          LANGCHAIN_TRACING_V2=false
+          LANGFUSE_SECRET_KEY=$LANGFUSE_SK
+          LANGFUSE_PUBLIC_KEY=$LANGFUSE_PK
+          LANGFUSE_BASE_URL=$LANGFUSE_HOST
+          LANGFUSE_HOST=$LANGFUSE_HOST
           DATABASE_URL=sqlite:///./sahayak.db
           CHROMA_PERSIST_DIR=./chroma_db
           GRAPH_CHECKPOINT_DB=./checkpoints.db
@@ -233,8 +256,8 @@ Resources:
           pip install --upgrade pip --quiet
           pip install -r backend/requirements.txt --quiet
 
-          # Index SOP documents
-          cd backend && python -m backend.rag.indexer && cd ..
+          # Index SOP documents (run from project root so module path resolves correctly)
+          python -m backend.rag.indexer
 
           # Build React frontend
           cd frontend && npm install --silent && npm run build && cd ..

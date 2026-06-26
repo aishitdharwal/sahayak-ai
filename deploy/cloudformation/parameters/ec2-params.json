@@ -1,7 +1,7 @@
 [
   {
     "ParameterKey": "AnthropicApiKey",
-    "ParameterValue": "sk-ant-FILL_ME_IN"
+    "ParameterValue": "FILL_ME_IN"
   },
   {
     "ParameterKey": "KeyPairName",
@@ -13,10 +13,18 @@
   },
   {
     "ParameterKey": "GitRepo",
-    "ParameterValue": "https://github.com/YOUR_ORG/sahayak-ai.git"
+    "ParameterValue": "https://github.com/aishitdharwal/sahayak-ai.git"
   },
   {
-    "ParameterKey": "LangSmithApiKey",
-    "ParameterValue": ""
+    "ParameterKey": "LangfuseSecretKey",
+    "ParameterValue": "FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "LangfusePublicKey",
+    "ParameterValue": "FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "LangfuseHost",
+    "ParameterValue": "https://eu.cloud.langfuse.com"
   }
 ]
