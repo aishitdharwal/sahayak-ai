@@ -1,0 +1,21 @@
+[Unit]
+Description=Sahayak AI FastAPI Backend
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/sahayak/backend
+Environment=PATH=/opt/sahayak/venv/bin
+EnvironmentFile=/opt/sahayak/.env
+
+# TRADEOFF vs ECS: A systemd service is simple and observable.
+# journalctl -u sahayak-backend -f shows live logs.
+# No CloudWatch, no container overhead — just a process on the machine.
+# Restart=always means crashes auto-recover, same as ECS task restarts.
+ExecStart=/opt/sahayak/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

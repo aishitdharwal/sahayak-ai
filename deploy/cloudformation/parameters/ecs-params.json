@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "AnthropicApiKey",
+    "ParameterValue": "sk-ant-FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "DBPassword",
+    "ParameterValue": "FILL_ME_IN_min_12_chars"
+  },
+  {
+    "ParameterKey": "ECRImageUri",
+    "ParameterValue": "FILLED_AUTOMATICALLY_BY_deploy-ecs.sh"
+  },
+  {
+    "ParameterKey": "LangfuseSecretKey",
+    "ParameterValue": "sk-lf-FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "LangfusePublicKey",
+    "ParameterValue": "pk-lf-FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "LangfuseBaseUrl",
+    "ParameterValue": "https://cloud.langfuse.com"
+  },
+  {
+    "ParameterKey": "DesiredTaskCount",
+    "ParameterValue": "2"
+  }
+]

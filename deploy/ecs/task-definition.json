@@ -1,0 +1,84 @@
+{
+  "family": "sahayak-ai",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/sahayakTaskRole",
+
+  "containerDefinitions": [
+    {
+      "name": "sahayak-backend",
+      "image": "ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/sahayak-ai:latest",
+      "portMappings": [
+        { "containerPort": 8000, "protocol": "tcp" }
+      ],
+
+      "environment": [
+        { "name": "ENVIRONMENT", "value": "production" },
+        { "name": "CHROMA_PERSIST_DIR", "value": "/mnt/efs/chroma_db" }
+      ],
+
+      "secrets": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:ACCOUNT_ID:secret:sahayak/anthropic-key"
+        },
+        {
+          "name": "POSTGRES_URL",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:ACCOUNT_ID:secret:sahayak/postgres-url"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:ACCOUNT_ID:secret:sahayak/redis-url"
+        },
+        {
+          "name": "FRONTEND_URL",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:ACCOUNT_ID:secret:sahayak/frontend-url"
+        }
+      ],
+
+      "mountPoints": [
+        {
+          "sourceVolume": "chroma-efs",
+          "containerPath": "/mnt/efs",
+          "readOnly": false
+        }
+      ],
+
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/sahayak-ai",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+
+  "volumes": [
+    {
+      "name": "chroma-efs",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-XXXXXXXX",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "fsap-XXXXXXXX",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ]
+}

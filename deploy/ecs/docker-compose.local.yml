@@ -1,0 +1,60 @@
+# Local ECS simulation — mirrors what runs in Fargate
+# Run: docker compose -f deploy/ecs/docker-compose.local.yml up
+#
+# This spins up the full ECS dependency graph locally:
+#   backend (FastAPI)  ←→  postgres (mimics RDS)
+#                      ←→  redis    (mimics ElastiCache)
+#
+# The ONLY difference from production ECS:
+#   - Postgres + Redis run as local containers, not managed AWS services
+#   - No EFS — ChromaDB uses a local volume
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: sahayak
+      POSTGRES_PASSWORD: sahayak_dev
+      POSTGRES_DB: sahayak
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "sahayak"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: deploy/ecs/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      POSTGRES_URL: postgresql+asyncpg://sahayak:sahayak_dev@postgres:5432/sahayak
+      REDIS_URL: redis://redis:6379
+      CHROMA_PERSIST_DIR: /mnt/chroma_db
+      FRONTEND_URL: http://localhost:5173
+      ENVIRONMENT: development
+    volumes:
+      - chroma_data:/mnt/chroma_db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  chroma_data:

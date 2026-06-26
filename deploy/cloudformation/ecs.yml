@@ -1,0 +1,712 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Sahayak AI — ECS Fargate Stack.
+  Full production-grade deployment: VPC (2 AZs), ALB, ECS Fargate, RDS Postgres,
+  ElastiCache Redis, EFS (ChromaDB), S3 + CloudFront (frontend), Secrets Manager.
+  All state is external to containers — tasks are stateless and horizontally scalable.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: RDS Postgres master password (min 12 chars)
+
+  ECRImageUri:
+    Type: String
+    Description: >
+      Full ECR image URI including tag.
+      Run deploy-ecs.sh first to build + push the image, then get this value.
+      Format: ACCOUNT.dkr.ecr.REGION.amazonaws.com/sahayak-ai:latest
+
+  LangfuseSecretKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+
+  LangfusePublicKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+
+  LangfuseBaseUrl:
+    Type: String
+    Default: "https://cloud.langfuse.com"
+
+  DesiredTaskCount:
+    Type: Number
+    Default: 2
+    Description: Number of Fargate tasks. Min 2 for zero-downtime rolling deploys.
+
+# ---------------------------------------------------------------------------
+# Resources — organized in dependency order
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ==========================================================================
+  # 1. NETWORKING
+  # ==========================================================================
+  # TRADEOFF: 2 AZs with public + private subnets.
+  # Public subnets: ALB, NAT Gateways.
+  # Private subnets: ECS tasks, RDS, ElastiCache, EFS.
+  # Rule: anything that doesn't need to accept internet traffic → private subnet.
+  # This limits the blast radius if a container is compromised.
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{Key: Name, Value: sahayak-ecs-vpc}]
+
+  # Public subnets (ALB lives here)
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: sahayak-public-a}]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: sahayak-public-b}]
+
+  # Private subnets (ECS tasks, RDS, Redis, EFS live here)
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{Key: Name, Value: sahayak-private-a}]
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{Key: Name, Value: sahayak-private-b}]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # NAT Gateway — lets private subnet resources (ECS tasks) reach the internet
+  # (to call the Anthropic API) without being directly reachable from it.
+  # TRADEOFF: One NAT GW in AZ-A (cheaper, ~$32/mo) vs two (HA, ~$64/mo).
+  # For a workshop: one is fine. For prod: two, one per AZ.
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ==========================================================================
+  # 2. SECURITY GROUPS — one per service, minimum required ports
+  # ==========================================================================
+  # PRINCIPLE: Each SG only allows traffic from the specific source that needs it.
+  # ECS tasks can reach RDS — but the ALB cannot. RDS cannot reach anything outbound.
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB — accepts HTTP from internet, forwards to ECS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Fargate tasks — only accepts traffic from ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS Postgres — only accepts from ECS tasks
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ElastiCache Redis — only accepts from ECS tasks
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EFS — NFS traffic from ECS tasks only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ECSSecurityGroup
+
+  # ==========================================================================
+  # 3. SECRETS MANAGER
+  # ==========================================================================
+  # TRADEOFF vs environment variables in task definition:
+  # Env vars are visible in ECS console and CloudTrail logs.
+  # Secrets Manager values are encrypted at rest, audited, and can be rotated.
+  # The task definition only holds the ARN — never the actual value.
+
+  AnthropicSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: sahayak/anthropic-key
+      SecretString: !Sub '{"ANTHROPIC_API_KEY":"${AnthropicApiKey}"}'
+
+  LangfuseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: sahayak/langfuse
+      SecretString: !Sub '{"LANGFUSE_SECRET_KEY":"${LangfuseSecretKey}","LANGFUSE_PUBLIC_KEY":"${LangfusePublicKey}","LANGFUSE_BASE_URL":"${LangfuseBaseUrl}"}'
+
+  DBPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: sahayak/db-password
+      SecretString: !Sub '{"password":"${DBPassword}"}'
+
+  # ==========================================================================
+  # 4. ECR REPOSITORY
+  # ==========================================================================
+
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: sahayak-ai
+      ImageScanningConfiguration:
+        ScanOnPush: true  # Free vulnerability scan on every push
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 5 images",
+              "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 5},
+              "action": {"type": "expire"}
+            }]
+          }
+
+  # ==========================================================================
+  # 5. RDS POSTGRES
+  # ==========================================================================
+  # Replaces two SQLite files: sahayak.db (app data) + checkpoints.db (LangGraph).
+  # TRADEOFF: db.t3.micro (~$15/mo) vs SQLite (free).
+  # You pay for: multi-task concurrent access, automated backups, point-in-time restore.
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Sahayak RDS subnet group
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot  # Snapshot before deletion — never lose data
+    Properties:
+      DBInstanceIdentifier: sahayak-postgres
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      EngineVersion: "16.2"
+      MasterUsername: sahayak
+      MasterUserPassword: !Ref DBPassword
+      DBName: sahayak
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref RDSSecurityGroup]
+      MultiAZ: false  # Set true for production HA (~2x cost)
+      StorageType: gp3
+      AllocatedStorage: 20
+      BackupRetentionPeriod: 7
+      DeletionProtection: false  # Set true in production
+
+  # ==========================================================================
+  # 6. ELASTICACHE REDIS
+  # ==========================================================================
+  # Replaces the in-memory WebSocket dict.
+  # TRADEOFF: cache.t3.micro (~$15/mo) vs Dict[str, WebSocket] (free).
+  # You pay for: cross-task pub/sub. Without this, 50% of review_ready events
+  # are silently dropped when tasks are behind an ALB.
+
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Sahayak Redis subnet group
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      ClusterName: sahayak-redis
+      Engine: redis
+      CacheNodeType: cache.t3.micro
+      NumCacheNodes: 1  # Single node for cost. Use ReplicationGroup for HA.
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds: [!Ref RedisSecurityGroup]
+
+  # ==========================================================================
+  # 7. EFS (ChromaDB vector index persistence)
+  # ==========================================================================
+  # TRADEOFF: EFS (~$0.30/GB/mo) vs local container filesystem (free but ephemeral).
+  # Without EFS: every new Fargate task starts with an empty ChromaDB.
+  # The first API call would fail until make seed re-runs.
+  # With EFS: all tasks share the same pre-built index. Seed once, use forever.
+
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: sahayak-chroma-efs
+
+  EFSMountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnetA
+      SecurityGroups: [!Ref EFSSecurityGroup]
+
+  EFSMountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PrivateSubnetB
+      SecurityGroups: [!Ref EFSSecurityGroup]
+
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        Path: /chroma
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "755"
+
+  # ==========================================================================
+  # 8. IAM ROLES
+  # ==========================================================================
+
+  # Execution role: used by ECS to pull images and inject secrets
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sahayak-ecs-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref AnthropicSecret
+                  - !Ref LangfuseSecret
+                  - !Ref DBPasswordSecret
+
+  # Task role: used by the running application container
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sahayak-ecs-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EFSAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                Resource: !GetAtt EFSFileSystem.Arn
+
+  # ==========================================================================
+  # 9. ECS CLUSTER + CLOUDWATCH LOGS
+  # ==========================================================================
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: sahayak-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled  # CPU/memory metrics in CloudWatch at no extra charge
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/sahayak-ai
+      RetentionInDays: 30
+
+  # ==========================================================================
+  # 10. ECS TASK DEFINITION
+  # ==========================================================================
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: sahayak-ai
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "1024"   # 1 vCPU
+      Memory: "2048" # 2 GB
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      Volumes:
+        - Name: chroma-efs
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref EFSFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EFSAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: sahayak-backend
+          Image: !Ref ECRImageUri
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          MountPoints:
+            - SourceVolume: chroma-efs
+              ContainerPath: /mnt/efs
+              ReadOnly: false
+          Environment:
+            - Name: ENVIRONMENT
+              Value: production
+            - Name: CHROMA_PERSIST_DIR
+              Value: /mnt/efs/chroma_db
+            - Name: INTENT_MODEL
+              Value: claude-haiku-4-5-20251001
+            - Name: REASONING_MODEL
+              Value: claude-sonnet-4-6
+            - Name: FRONTEND_URL
+              Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+          Secrets:
+            - Name: ANTHROPIC_API_KEY
+              ValueFrom: !Sub "${AnthropicSecret}:ANTHROPIC_API_KEY::"
+            - Name: LANGFUSE_SECRET_KEY
+              ValueFrom: !Sub "${LangfuseSecret}:LANGFUSE_SECRET_KEY::"
+            - Name: LANGFUSE_PUBLIC_KEY
+              ValueFrom: !Sub "${LangfuseSecret}:LANGFUSE_PUBLIC_KEY::"
+            - Name: LANGFUSE_BASE_URL
+              ValueFrom: !Sub "${LangfuseSecret}:LANGFUSE_BASE_URL::"
+            - Name: POSTGRES_URL
+              ValueFrom: !Sub
+                - "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:sahayak/postgres-url"
+                - {}
+            - Name: REDIS_URL
+              ValueFrom: !Sub
+                - "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:sahayak/redis-url"
+                - {}
+          HealthCheck:
+            Command: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/sahayak-ai
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # ==========================================================================
+  # 11. APPLICATION LOAD BALANCER
+  # ==========================================================================
+  # TRADEOFF vs EC2/Nginx: ALB handles WebSocket upgrades automatically,
+  # integrates with ACM (free SSL certs), and routes health checks.
+  # Cost: ~$16/mo base + $0.008/LCU.
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: sahayak-alb
+      Type: application
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref ALBSecurityGroup]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: sahayak-tg
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: ip  # Fargate uses IP targets, not instance IDs
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ==========================================================================
+  # 12. ECS SERVICE
+  # ==========================================================================
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: sahayak-backend
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredTaskCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+          SecurityGroups: [!Ref ECSSecurityGroup]
+          AssignPublicIp: DISABLED  # Private subnet — reaches internet via NAT
+      LoadBalancers:
+        - ContainerName: sahayak-backend
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroup
+      DeploymentConfiguration:
+        # Rolling deploy: bring up new tasks before draining old ones
+        # MinimumHealthyPercent: 50 means one task stays up while the other is replaced
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+      HealthCheckGracePeriodSeconds: 30
+
+  # ==========================================================================
+  # 13. S3 + CLOUDFRONT (React frontend)
+  # ==========================================================================
+  # TRADEOFF vs Nginx on EC2: S3 + CloudFront serves static assets from edge
+  # locations (~200ms → ~20ms for users far from your region).
+  # Frontend and backend deploy independently — push new React build without
+  # touching the ECS service.
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "sahayak-frontend-${AWS::AccountId}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html  # SPA fallback
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: sahayak-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !Ref CloudFrontOAC
+        DefaultCacheBehavior:
+          ViewerProtocolPolicy: redirect-to-https
+          TargetOriginId: S3Origin
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized managed policy
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html  # React SPA routing
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  ALBEndpoint:
+    Value: !GetAtt ALB.DNSName
+    Description: Backend API URL — use this as VITE_API_URL when building the frontend
+
+  CloudFrontURL:
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+    Description: Frontend dashboard URL
+
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+    Description: S3 bucket for frontend deploy — run deploy-ecs.sh to sync React build
+
+  ECRRepositoryURI:
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Description: ECR URI — use this as ECRImageUri parameter for re-deployments
+
+  RDSEndpoint:
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Description: RDS hostname — used to construct POSTGRES_URL secret
+
+  RedisEndpoint:
+    Value: !GetAtt RedisCluster.RedisEndpoint.Address
+    Description: ElastiCache hostname — used to construct REDIS_URL secret
+
+  EFSFileSystemId:
+    Value: !Ref EFSFileSystem
+    Description: EFS ID — run make seed with this mounted to build ChromaDB index
+
+  PrivateSubnetA:
+    Value: !Ref PrivateSubnetA
+    Description: Private subnet A — used by the seed one-off task
+
+  PrivateSubnetB:
+    Value: !Ref PrivateSubnetB
+    Description: Private subnet B
+
+  ECSSecurityGroupId:
+    Value: !Ref ECSSecurityGroup
+    Description: ECS security group — used by the seed one-off task

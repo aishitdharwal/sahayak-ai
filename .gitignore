@@ -1,0 +1,33 @@
+# Environment — never commit secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Databases — runtime state, not source
+*.db
+*.db-shm
+*.db-wal
+
+# ChromaDB — rebuilt by make seed
+chroma_db/
+
+# Frontend build output
+frontend/node_modules/
+frontend/dist/
+
+# macOS
+.DS_Store
+
+# Claude Code session files
+.claude/
+
+# Workshop outline (internal planning doc)
+flipkart_project_outline.md

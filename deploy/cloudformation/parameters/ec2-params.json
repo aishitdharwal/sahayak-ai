@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "AnthropicApiKey",
+    "ParameterValue": "sk-ant-FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "KeyPairName",
+    "ParameterValue": "FILL_ME_IN"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.medium"
+  },
+  {
+    "ParameterKey": "GitRepo",
+    "ParameterValue": "https://github.com/YOUR_ORG/sahayak-ai.git"
+  },
+  {
+    "ParameterKey": "LangSmithApiKey",
+    "ParameterValue": ""
+  }
+]

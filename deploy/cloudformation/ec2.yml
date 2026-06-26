@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Sahayak AI — EC2 Single-Instance Stack.
+  Provisions a VPC, public subnet, security group, and a t3.medium EC2 instance
+  running Nginx + FastAPI (systemd). All state is local: SQLite + ChromaDB on EBS.
+  Everything the application needs runs on one machine.
+
+# ---------------------------------------------------------------------------
+# Parameters — fill these in parameters/ec2-params.json before deploying
+# ---------------------------------------------------------------------------
+Parameters:
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Description: Anthropic API key — stored in Secrets Manager, never in plaintext on disk
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access
+
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large]
+    Description: >
+      t3.medium (2 vCPU, 4GB) handles the workshop demo comfortably.
+      sentence-transformers (ChromaDB embeddings) needs ~1.5GB RAM on first load.
+
+  GitRepo:
+    Type: String
+    Description: HTTPS URL of your repo, e.g. https://github.com/yourorg/sahayak-ai.git
+
+  LangSmithApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional — enables LangSmith tracing
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # --- Networking -----------------------------------------------------------
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: sahayak-ec2-vpc
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # --- Security Group -------------------------------------------------------
+  # TRADEOFF: Port 22 open to 0.0.0.0/0 is convenient for a workshop.
+  # In production: restrict SSH to your office IP or use SSM Session Manager
+  # and remove port 22 entirely.
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Sahayak AI EC2 security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP — Nginx
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS (for when you add a cert)
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH — restrict to your IP in production
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # --- Secrets Manager ------------------------------------------------------
+  # TRADEOFF vs env files: Secrets Manager rotates, audits, and encrypts at rest.
+  # The EC2 instance IAM role gives it read access — no key lives on disk.
+
+  AnthropicSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: sahayak/anthropic-key
+      SecretString: !Sub '{"ANTHROPIC_API_KEY":"${AnthropicApiKey}"}'
+
+  LangSmithSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: sahayak/langsmith-key
+      SecretString: !Sub '{"LANGCHAIN_API_KEY":"${LangSmithApiKey}"}'
+
+  # --- IAM ------------------------------------------------------------------
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sahayak-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # SSM Session Manager (SSH alternative)
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref AnthropicSecret
+                  - !Ref LangSmithSecret
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EC2Role]
+
+  # --- EC2 Instance ---------------------------------------------------------
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: IGWAttachment
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      ImageId: "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      # Resolves to latest Ubuntu 22.04 LTS AMI for the current region — no hardcoded AMI IDs
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref SecurityGroup]
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30   # GB — ChromaDB + model cache can be ~3-4GB
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: sahayak-ai-ec2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > /var/log/sahayak-setup.log 2>&1
+
+          # System packages
+          apt-get update -y
+          apt-get install -y python3.11 python3.11-venv python3-pip nodejs npm nginx git awscli jq
+
+          # Fetch secrets from Secrets Manager into env file
+          ANTHROPIC_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id sahayak/anthropic-key \
+            --region ${AWS::Region} \
+            --query SecretString --output text | jq -r '.ANTHROPIC_API_KEY')
+
+          LANGSMITH_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id sahayak/langsmith-key \
+            --region ${AWS::Region} \
+            --query SecretString --output text | jq -r '.LANGCHAIN_API_KEY')
+
+          # Clone application
+          mkdir -p /opt/sahayak
+          git clone ${GitRepo} /opt/sahayak
+          cd /opt/sahayak
+
+          # Write .env (never echoed to logs because secrets were fetched via SDK)
+          cat > .env <<EOF
+          ANTHROPIC_API_KEY=$ANTHROPIC_KEY
+          LANGCHAIN_API_KEY=$LANGSMITH_KEY
+          LANGCHAIN_TRACING_V2=false
+          DATABASE_URL=sqlite:///./sahayak.db
+          CHROMA_PERSIST_DIR=./chroma_db
+          GRAPH_CHECKPOINT_DB=./checkpoints.db
+          INTENT_MODEL=claude-haiku-4-5-20251001
+          REASONING_MODEL=claude-sonnet-4-6
+          FRONTEND_URL=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+          ENVIRONMENT=production
+          EOF
+
+          # Python dependencies
+          python3.11 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip --quiet
+          pip install -r backend/requirements.txt --quiet
+
+          # Index SOP documents
+          cd backend && python -m backend.rag.indexer && cd ..
+
+          # Build React frontend
+          cd frontend && npm install --silent && npm run build && cd ..
+
+          # Install systemd service
+          cp deploy/ec2/sahayak-backend.service /etc/systemd/system/
+          systemctl daemon-reload
+          systemctl enable sahayak-backend
+          systemctl start sahayak-backend
+
+          # Install Nginx config
+          cp deploy/ec2/nginx.conf /etc/nginx/sites-available/sahayak
+          ln -sf /etc/nginx/sites-available/sahayak /etc/nginx/sites-enabled/sahayak
+          rm -f /etc/nginx/sites-enabled/default
+          systemctl restart nginx
+
+          echo "SETUP COMPLETE"
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref EC2Instance
+      Domain: vpc
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  PublicIP:
+    Value: !Ref ElasticIP
+    Description: Elastic IP — this address is stable across instance reboots
+
+  DashboardURL:
+    Value: !Sub "http://${ElasticIP}"
+    Description: Sahayak AI dashboard
+
+  SSHCommand:
+    Value: !Sub "ssh -i ~/.ssh/${KeyPairName}.pem ubuntu@${ElasticIP}"
+
+  SetupLog:
+    Value: !Sub "ssh in and run: sudo tail -f /var/log/sahayak-setup.log"
+    Description: Watch first-boot setup progress
