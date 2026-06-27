@@ -27,7 +27,7 @@ export function AgentDashboard() {
     try {
       const queueRes = await axios.get(`${API}/api/tickets/queue`);
       const pending = queueRes.data as Array<{ ticket_id: string }>;
-      if (pending.length === 0) return;
+      if (pending.length === 0) { setTicketState({ status: "idle" }); return; }
       const { ticket_id } = pending[0];
       const stateRes = await axios.get(`${API}/api/hitl/${ticket_id}/state`);
       const workspace: AgentWorkspace = stateRes.data.workspace;
